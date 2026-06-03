@@ -1,5 +1,11 @@
 package org.booklore.service.metadata.parser;
 
+import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.WordUtils;
+import org.apache.commons.text.similarity.FuzzyScore;
+import org.apache.commons.text.similarity.LevenshteinDistance;
 import org.booklore.model.dto.Book;
 import org.booklore.model.dto.BookMetadata;
 import org.booklore.model.dto.request.FetchMetadataRequest;
@@ -10,14 +16,6 @@ import org.booklore.service.metadata.parser.hardcover.HardcoverBookSearchService
 import org.booklore.service.metadata.parser.hardcover.HardcoverMoodFilter;
 import org.booklore.util.BookUtils;
 import org.booklore.util.LanguageNormalizer;
-
-import lombok.AllArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.text.WordUtils;
-import org.apache.commons.text.similarity.FuzzyScore;
-import org.apache.commons.text.similarity.LevenshteinDistance;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -39,8 +37,9 @@ public class HardcoverParser implements BookParser {
 
     @Override
     public List<BookMetadata> fetchMetadata(Book book, FetchMetadataRequest fetchMetadataRequest) {
-        String isbnCleaned = ParserUtils.cleanIsbn(fetchMetadataRequest.getIsbn());
-        boolean searchByIsbn = isbnCleaned != null && !isbnCleaned.isBlank();
+        List<String> isbnCleaned = new ArrayList<>();
+        isbnCleaned.add(ParserUtils.cleanIsbn(fetchMetadataRequest.getIsbn()));
+        boolean searchByIsbn = isbnCleaned.getFirst() != null && !isbnCleaned.getFirst().isEmpty();
 
         if (searchByIsbn) {
             log.info("Hardcover: Fetching metadata using ISBN {}", isbnCleaned);

@@ -1,7 +1,7 @@
 package org.booklore.service.metadata.parser.hardcover;
 
-import org.booklore.service.appsettings.AppSettingService;
 import lombok.extern.slf4j.Slf4j;
+import org.booklore.service.appsettings.AppSettingService;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
@@ -10,15 +10,15 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @Service
 public class HardcoverBookSearchService {
 
     public static final int DEFAULT_PER_PAGE = 10;
-    private static final long INITIAL_DELAY_MS = 1200;
+    private static final long INITIAL_DELAY_MS = 1000;
     private static final long MAX_DELAY_MS = 15000;
 
     private final RestClient restClient;
@@ -34,7 +34,11 @@ public class HardcoverBookSearchService {
                 .build();
     }
 
-    public List<GraphQLResponse.BookWithEditions> searchBookByIsbn(String isbn) {
+    public List<GraphQLResponse.BookWithEditions> searchBookByIsbn(List<String> isbn) {
+        return searchBookByIsbn(isbn, 0);
+    }
+
+    public List<GraphQLResponse.BookWithEditions> searchBookByIsbn(List<String> isbn, int hcid) {
         String apiToken = getApiToken();
         if (apiToken == null) {
             return Collections.emptyList();
@@ -42,9 +46,9 @@ public class HardcoverBookSearchService {
 
         GraphQLRequest body = new GraphQLRequest();
         body.setQuery("""
-                query BookSearchByIsbn($isbn: String!) {
+                query BookSearchByIsbn($isbn: [String!]!, $hcid: Int!) {
                     books(
-                        where: {editions: {_or: [{isbn_13: {_eq: $isbn}}, {isbn_10: {_eq: $isbn}}]}}
+                        where: {editions: {_or: [{isbn_13: {_in: $isbn}}, {isbn_10: {_in: $isbn}}, {book_id: {_eq: $hcid}} ]}}
                     ) {
                         id
                         slug
@@ -70,7 +74,7 @@ public class HardcoverBookSearchService {
                           url
                         }
                         cached_tags
-                        editions(where: {_or: [{isbn_13: {_eq: $isbn}}, {isbn_10: {_eq: $isbn}}]}) {
+                        editions(where: {_or: [{isbn_13: {_in: $isbn}}, {isbn_10: {_in: $isbn}}, {book_id: {_eq: 1682803}}]}, order_by: [{score: desc}]) {
                           id
                           title
                           subtitle
@@ -89,10 +93,11 @@ public class HardcoverBookSearchService {
                           language {
                             code2
                           }
+                          reading_format_id
                         }
                       }
                     }""");
-        body.setVariables(Map.of("isbn", isbn));
+        body.setVariables(Map.of("isbn", isbn, "hcid", hcid));
 
         GraphQLResponse response = executeRequest(body, GraphQLResponse.class, apiToken);
         if (response == null || response.getData() == null ||
