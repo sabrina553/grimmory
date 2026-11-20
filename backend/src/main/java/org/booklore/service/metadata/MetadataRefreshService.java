@@ -403,7 +403,9 @@ public class MetadataRefreshService {
             return null;
         }
 
-        return parser.fetchTopMetadata(book, buildFetchMetadataRequestFromBook(book));
+        String libraryTitle = book.getMetadata() != null ? book.getMetadata().getTitle() : null;
+        return TitleSubtitleSplitter.split(
+                parser.fetchTopMetadata(book, buildFetchMetadataRequestFromBook(book)), libraryTitle);
     }
 
     private BookParser getParser(MetadataProvider provider) {

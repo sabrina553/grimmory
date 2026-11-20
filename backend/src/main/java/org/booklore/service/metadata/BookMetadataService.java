@@ -101,6 +101,7 @@ public class BookMetadataService {
                     }
 
                     return Flux.defer(() -> parser.fetchMetadataStream(book, request))
+                            .map(metadata -> TitleSubtitleSplitter.split(metadata, libraryTitle(book, request)))
                             .subscribeOn(Schedulers.boundedElastic())
                             .onErrorResume(e -> {
                                 log.error("Error fetching metadata from provider: {}", provider, e);
@@ -116,7 +117,20 @@ public class BookMetadataService {
             return List.of();
         }
 
-        return parser.fetchMetadata(book, request);
+        List<BookMetadata> results = parser.fetchMetadata(book, request);
+        if (results == null) {
+            return List.of();
+        }
+        String libraryTitle = libraryTitle(book, request);
+        results.forEach(metadata -> TitleSubtitleSplitter.split(metadata, libraryTitle));
+        return results;
+    }
+
+    private static String libraryTitle(Book book, FetchMetadataRequest request) {
+        if (book != null && book.getMetadata() != null && book.getMetadata().getTitle() != null) {
+            return book.getMetadata().getTitle();
+        }
+        return request != null ? request.getTitle() : null;
     }
 
 

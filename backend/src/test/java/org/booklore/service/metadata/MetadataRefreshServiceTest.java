@@ -205,6 +205,25 @@ class MetadataRefreshServiceTest {
     }
 
     @Test
+    void fetchMetadataForBook_splitsCombinedProviderTitle() {
+        BookParser parser = mock(BookParser.class);
+        when(parserMap.get(MetadataProvider.Amazon)).thenReturn(parser);
+        when(parser.isEnabled()).thenReturn(true);
+        when(parser.fetchTopMetadata(any(), any())).thenReturn(BookMetadata.builder()
+                .provider(MetadataProvider.Amazon).title("Lamb: The Gospel").build());
+
+        BookEntity entity = BookEntity.builder().id(1L).build();
+        Book book = Book.builder().id(1L).metadata(BookMetadata.builder().title("Lamb").build()).build();
+        when(bookMapper.toBook(entity)).thenReturn(book);
+
+        BookMetadata result = service.fetchMetadataForBook(List.of(MetadataProvider.Amazon), entity)
+                .get(MetadataProvider.Amazon);
+
+        assertThat(result.getTitle()).isEqualTo("Lamb");
+        assertThat(result.getSubtitle()).isEqualTo("The Gospel");
+    }
+
+    @Test
     void fetchMetadataForBook_entityOverload_convertsAndFetches() {
         BookParser parser = mock(BookParser.class);
         when(parserMap.get(MetadataProvider.Amazon)).thenReturn(parser);

@@ -30,6 +30,7 @@ import org.booklore.service.metadata.extractor.CbxMetadataExtractor;
 import org.booklore.service.metadata.extractor.MetadataExtractorFactory;
 import org.booklore.service.metadata.parser.BookParser;
 import org.booklore.service.metadata.parser.DetailedMetadataProvider;
+import reactor.core.publisher.Flux;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -98,6 +99,22 @@ class BookMetadataServiceTest {
             List<BookMetadata> result = service.fetchMetadataListFromAProvider(MetadataProvider.Google, book, request);
 
             assertThat(result).isEqualTo(expected);
+        }
+
+        @Test
+        void splitsCombinedProviderTitle() {
+            BookParser parser = mock(BookParser.class);
+            parserMap.put(MetadataProvider.Google, parser);
+            Book book = Book.builder().metadata(BookMetadata.builder().title("Lamb").build()).build();
+            FetchMetadataRequest request = FetchMetadataRequest.builder().build();
+            when(parser.isEnabled()).thenReturn(true);
+            when(parser.fetchMetadata(book, request))
+                    .thenReturn(List.of(BookMetadata.builder().title("Lamb: The Gospel").build()));
+
+            List<BookMetadata> result = service.fetchMetadataListFromAProvider(MetadataProvider.Google, book, request);
+
+            assertThat(result.getFirst().getTitle()).isEqualTo("Lamb");
+            assertThat(result.getFirst().getSubtitle()).isEqualTo("The Gospel");
         }
 
         @Test
@@ -624,6 +641,27 @@ class BookMetadataServiceTest {
 
     @Nested
     class GetProspectiveMetadataListForBookId {
+
+        @Test
+        void splitsCombinedProviderTitle() {
+            BookParser parser = mock(BookParser.class);
+            parserMap.put(MetadataProvider.Google, parser);
+            BookEntity entity = BookEntity.builder().id(1L).build();
+            Book book = Book.builder().id(1L).metadata(BookMetadata.builder().title("Lamb").build()).build();
+            FetchMetadataRequest request = FetchMetadataRequest.builder()
+                    .providers(List.of(MetadataProvider.Google))
+                    .build();
+            when(bookRepository.findByIdWithBookFiles(1L)).thenReturn(Optional.of(entity));
+            when(bookMapper.toBook(entity)).thenReturn(book);
+            when(parser.isEnabled()).thenReturn(true);
+            when(parser.fetchMetadataStream(book, request))
+                    .thenReturn(Flux.just(BookMetadata.builder().title("Lamb: The Gospel").build()));
+
+            BookMetadata result = service.getProspectiveMetadataListForBookId(1L, request).blockFirst();
+
+            assertThat(result.getTitle()).isEqualTo("Lamb");
+            assertThat(result.getSubtitle()).isEqualTo("The Gospel");
+        }
 
         @Test
         void throwsWhenBookNotFound() {
