@@ -12,6 +12,7 @@ import org.booklore.service.metadata.parser.hardcover.HardcoverBookSearchService
 import org.booklore.service.metadata.parser.hardcover.HardcoverCachedTag;
 import org.jsoup.Jsoup;
 import org.junit.jupiter.api.*;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.MockitoAnnotations;
@@ -441,6 +442,105 @@ class HardcoverParserTest {
             parser.fetchMetadata(book, request);
 
             verify(hardcoverBookSearchService).searchBooks("The Prince");
+        }
+    }
+
+    @Nested
+    @DisplayName("Title Similarity Tests")
+    class TitleSimilarityTests {
+
+        @SuppressWarnings("unchecked")
+        private List<Integer> capturedHcids() {
+            ArgumentCaptor<List<Integer>> captor = ArgumentCaptor.forClass(List.class);
+            verify(hardcoverBookSearchService).searchBookByHcid(captor.capture());
+            return captor.getValue();
+        }
+
+        @Test
+        @DisplayName("Should reject a hit whose title is unrelated, so the next provider is tried")
+        void fetchMetadata_unrelatedTitle_returnsEmpty() {
+            Book book = Book.builder().title("Pirate King").build();
+            FetchMetadataRequest request = FetchMetadataRequest.builder()
+                    .title("Pirate King")
+                    .build();
+
+            GraphQLResponse.Hit wrong = createHitWithAuthor(
+                    "Publication Manual of the American Psychological Association", "APA", "1");
+            wrong.getDocument().setUsersCount(5000);
+            when(hardcoverBookSearchService.searchBooks("Pirate King")).thenReturn(List.of(wrong));
+
+            assertThat(parser.fetchTopMetadata(book, request)).isNull();
+            verify(hardcoverBookSearchService, never()).searchBookByHcid(any());
+        }
+
+        @Test
+        @DisplayName("Should rank an exact obscure title above a popular near-miss")
+        void fetchMetadata_exactObscureTitle_beatsPopularNearMiss() {
+            Book book = Book.builder().title("Op-Center").build();
+            FetchMetadataRequest request = FetchMetadataRequest.builder()
+                    .title("Op-Center")
+                    .build();
+
+            GraphQLResponse.Hit popular = createHitWithAuthor("Op-Center: Acts of War", "Tom Clancy", "10");
+            popular.getDocument().setTitle("Acts of War");
+            popular.getDocument().setUsersCount(10000);
+            GraphQLResponse.Hit exact = createHitWithAuthor("Op-Center", "Tom Clancy", "20");
+            exact.getDocument().setUsersCount(3);
+            when(hardcoverBookSearchService.searchBooks("Op-Center")).thenReturn(List.of(popular, exact));
+
+            parser.fetchMetadata(book, request);
+
+            assertThat(capturedHcids()).containsExactly(20);
+        }
+
+        @Test
+        @DisplayName("Should use popularity only to break ties between equally similar titles")
+        void fetchMetadata_equalTitles_popularityBreaksTie() {
+            Book book = Book.builder().title("Dune").build();
+            FetchMetadataRequest request = FetchMetadataRequest.builder().title("Dune").build();
+
+            GraphQLResponse.Hit obscure = createHitWithAuthor("Dune", "Someone Else", "1");
+            obscure.getDocument().setUsersCount(2);
+            GraphQLResponse.Hit popular = createHitWithAuthor("Dune", "Frank Herbert", "2");
+            popular.getDocument().setUsersCount(9000);
+            when(hardcoverBookSearchService.searchBooks("Dune")).thenReturn(List.of(obscure, popular));
+
+            parser.fetchMetadata(book, request);
+
+            assertThat(capturedHcids()).containsExactly(2, 1);
+        }
+
+        @Test
+        @DisplayName("Should match titles that differ only by subtitle or punctuation")
+        void titleSimilarity_ignoresSubtitleAndPunctuation() {
+            String search = HardcoverParser.normaliseTitle("The Hobbit");
+            assertThat(HardcoverParser.titleSimilarity(search, "The Hobbit: There and Back Again")).isEqualTo(1.0);
+            assertThat(HardcoverParser.titleSimilarity(
+                    HardcoverParser.normaliseTitle("How to Make Workbenches & Shop Storage Solutions"),
+                    "How to Make Workbenches and Shop Storage Solutions")).isEqualTo(1.0);
+        }
+
+        @Test
+        @DisplayName("Should not fail on candidate titles that repeat a word")
+        void titleSimilarity_repeatedWords_doesNotThrow() {
+            assertThat(HardcoverParser.titleSimilarity(
+                    HardcoverParser.normaliseTitle("Ready Player One"),
+                    "Summary of Ready Player One | Summary & Analysis"))
+                    .isGreaterThanOrEqualTo(HardcoverParser.MIN_TITLE_SIMILARITY);
+        }
+
+        @Test
+        @DisplayName("Should score the reported mismatches below the threshold")
+        void titleSimilarity_reportedMismatches_belowThreshold() {
+            assertThat(HardcoverParser.titleSimilarity(
+                    HardcoverParser.normaliseTitle("Building Simple Furniture"), "Google SketchUp"))
+                    .isLessThan(HardcoverParser.MIN_TITLE_SIMILARITY);
+            assertThat(HardcoverParser.titleSimilarity(
+                    HardcoverParser.normaliseTitle("The Big Book of Weekend Woodworking"), "Live From New York"))
+                    .isLessThan(HardcoverParser.MIN_TITLE_SIMILARITY);
+            assertThat(HardcoverParser.titleSimilarity(
+                    HardcoverParser.normaliseTitle("Commander in Chief"), "Battle Ready"))
+                    .isLessThan(HardcoverParser.MIN_TITLE_SIMILARITY);
         }
     }
 

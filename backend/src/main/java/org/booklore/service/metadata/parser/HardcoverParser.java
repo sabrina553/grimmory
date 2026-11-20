@@ -25,13 +25,15 @@ import java.time.LocalDate;
 import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 @Slf4j
 @Service
 @AllArgsConstructor
 public class HardcoverParser implements BookParser {
     private static final String EXTERNAL_URL_TEMPLATE = "https://hardcover.app/books/{id}";
+
+    // Below this a hit is treated as a different book, so the next provider gets a chance.
+    static final double MIN_TITLE_SIMILARITY = 0.7;
 
     private final HardcoverBookSearchService hardcoverBookSearchService;
     private final AppSettingService appSettingService;
@@ -155,57 +157,89 @@ public class HardcoverParser implements BookParser {
         String searchTitle = request.getTitle() != null ? request.getTitle() : "";
         String searchAuthor = request.getAuthor() != null ? formatRequestAuthor(request.getAuthor()) : "";
 
-        //convert hits into document format.
-        Stream<GraphQLResponse.Document> docs = hits.stream()
-                .map(GraphQLResponse.Hit::getDocument)
-                .filter(Objects::nonNull);
-
         log.debug("Filtering by title: '{}', author: '{}'", searchTitle, searchAuthor);
 
-        if (!searchTitle.isBlank()) {
-            docs = docs
-                .map(mapTitleLevenshtein(searchTitle))
-                .sorted(Comparator.comparingDouble(ScoredDocument::score))
-                .map(ScoredDocument::document);
-            log.debug("Filtered by title: {}", searchTitle);
-        }
+        Function<GraphQLResponse.Document, ScoredDocument> titleScorer = mapTitleSimilarity(searchTitle);
+        Function<GraphQLResponse.Document, ScoredDocument> authorScorer = mapAuthorLevenshtien(searchAuthor);
 
-        if (!searchAuthor.isBlank()) {
-            docs = docs
-                    .map(mapAuthorLevenshtien(searchAuthor))
-                    .sorted(Comparator.comparingDouble(ScoredDocument::score))
-                    .filter(doc -> doc.score <= (searchAuthor.length() * 0.8))
-                    .map(ScoredDocument::document);
-        }
-
-        return docs.toList();
+        // Title similarity is a hard floor: a search always returns something, so without it the
+        // best of a bad list gets applied and lower-priority providers never get a chance.
+        return hits.stream()
+                .map(GraphQLResponse.Hit::getDocument)
+                .filter(Objects::nonNull)
+                .map(doc -> new RankedDocument(
+                        doc,
+                        searchTitle.isBlank() ? 1.0 : titleScorer.apply(doc).score(),
+                        searchAuthor.isBlank() ? 0.0 : authorScorer.apply(doc).score(),
+                        doc.getUsersCount() == null ? 0 : doc.getUsersCount()))
+                .filter(ranked -> ranked.titleSimilarity() >= MIN_TITLE_SIMILARITY)
+                .filter(ranked -> searchAuthor.isBlank() || ranked.authorDistance() <= searchAuthor.length() * 0.8)
+                .sorted(Comparator.comparingDouble(RankedDocument::titleSimilarity).reversed()
+                        .thenComparingDouble(RankedDocument::authorDistance)
+                        .thenComparing(Comparator.comparingInt(RankedDocument::usersCount).reversed()))
+                .map(RankedDocument::document)
+                .toList();
     }
 
-    private Function<GraphQLResponse.Document, ScoredDocument> mapTitleLevenshtein(String searchTitle) {
-        LevenshteinDistance levenshtein = LevenshteinDistance.getDefaultInstance();
-        String searchTitleLower = searchTitle.toLowerCase();
+    /**
+     * Scores a document by how closely its title (or best alternative title) matches the search,
+     * from 0 (unrelated) to 1 (identical after normalisation).
+     */
+    private Function<GraphQLResponse.Document, ScoredDocument> mapTitleSimilarity(String searchTitle) {
+        String normalisedSearch = normaliseTitle(searchTitle);
 
         return (GraphQLResponse.Document doc) -> {
-            if (doc.getTitle() == null || doc.getTitle().isBlank()) {
-                return new ScoredDocument(doc, Double.MAX_VALUE);
+            List<String> candidates = new ArrayList<>();
+            if (doc.getTitle() != null) {
+                candidates.add(doc.getTitle());
             }
-            // calculate the lev.dist for the Work-level title and the search provided term
-            double totalScore = levenshtein.apply(searchTitleLower, doc.getTitle().toLowerCase());
-
             if (doc.getAlternativeTitles() != null) {
-                //repeat the lev.dist calc for each of the alternative titles
-                totalScore += doc.getAlternativeTitles()
-                        .stream()
-                        .map(String::toLowerCase)
-                        .map(title -> levenshtein.apply(searchTitleLower, title))
-                        .min(Double::compare)
-                        .orElse(Integer.MAX_VALUE);
+                candidates.addAll(doc.getAlternativeTitles());
             }
-
-            // (minTitleDist+minAltTitleDist)/1+userCount. best scores should approach 0
-            int usersCount = doc.getUsersCount() == null ? 0 : doc.getUsersCount();
-            return new ScoredDocument(doc, (totalScore + 1)/(usersCount + 1));
+            double best = candidates.stream()
+                    .filter(Objects::nonNull)
+                    .mapToDouble(candidate -> titleSimilarity(normalisedSearch, candidate))
+                    .max()
+                    .orElse(0.0);
+            return new ScoredDocument(doc, best);
         };
+    }
+
+    static double titleSimilarity(String normalisedSearch, String candidateTitle) {
+        if (normalisedSearch.isBlank()) {
+            return 0.0;
+        }
+        String normalisedCandidate = normaliseTitle(candidateTitle);
+        if (normalisedCandidate.isBlank()) {
+            return 0.0;
+        }
+        int maxLength = Math.max(normalisedSearch.length(), normalisedCandidate.length());
+        double editSimilarity = 1.0 - (double) LevenshteinDistance.getDefaultInstance()
+                .apply(normalisedSearch, normalisedCandidate) / maxLength;
+
+        // Multi-word searches also match when every word appears in the candidate, so
+        // "Ready Player One" still finds "Summary of Ready Player One". Single words are
+        // excluded because a short word like "it" appears in almost everything.
+        List<String> searchWords = List.of(normalisedSearch.split(" "));
+        Set<String> candidateWords = new HashSet<>(Arrays.asList(normalisedCandidate.split(" ")));
+        boolean allWordsPresent = searchWords.size() > 1 && candidateWords.containsAll(searchWords);
+
+        return allWordsPresent ? Math.max(editSimilarity, MIN_TITLE_SIMILARITY) : editSimilarity;
+    }
+
+    /**
+     * Lowercases, drops any subtitle after ':', and collapses punctuation to single spaces,
+     * so "The Hobbit: There and Back Again" and "the hobbit" compare as equal.
+     */
+    static String normaliseTitle(String title) {
+        if (title == null) {
+            return "";
+        }
+        String mainTitle = title.split(":", 2)[0];
+        return mainTitle.toLowerCase(Locale.ROOT)
+                .replace("&", " and ")
+                .replaceAll("[^\\p{L}\\p{N}]+", " ")
+                .trim();
     }
 
     private Function<GraphQLResponse.Document, ScoredDocument> mapAuthorLevenshtien(String searchAuthor) {
@@ -518,6 +552,13 @@ public class HardcoverParser implements BookParser {
         List<BookMetadata> bookMetadata = fetchMetadata(book, fetchMetadataRequest);
         return bookMetadata.isEmpty() ? null : bookMetadata.getFirst();
     }
+
+    record RankedDocument(
+            GraphQLResponse.Document document,
+            double titleSimilarity,
+            double authorDistance,
+            int usersCount
+    ) {}
 
     record ScoredDocument (
             GraphQLResponse.Document document,
